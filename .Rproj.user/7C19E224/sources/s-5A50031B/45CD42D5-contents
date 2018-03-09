@@ -1,0 +1,226 @@
+---
+title: "Human Activity Recognition (HAR)"
+subtitle: "Data Science in R - Practical Machine Learning"
+author: "Nikolai Alexander"
+date: "March 8, 2018"
+output: html_document
+---
+
+#I. Abstract
+
+The premise of this project is to create a machine learning algorithm that will recognize whether the subject is doing an exercise properly or improperly. 6 participants were required to perform 1 set of 10 reps of unilateral dumbbell bicep curls in 5 different positions.  The data was pulled from accelerometers attached to the belt, forearm, arm, and dumbbell. The way in which they performed the workout was categorized under 5 *classe*s; Class A (exactly according to specification), Class B (throwing elbows forward), Class C (Lifting only half-way), Class D (lowing only half-way), Class E (throwing hips forward). The algorithm used to predict future *classe*s of workouts was a random forest. This method was able to predict the *validation* dataset with 100% accuracy according to the Coursera Course Project Prediction Quiz.
+
+
+
+#II. Procedure
+##1. Reading & Cross-Validation
+###a. Packages
+
+```{r packages, message=FALSE}
+library(caret)
+library(randomForest)
+```
+
+The packages used in this analysis are *caret* and *randomForest*. *caret* also depends on *ggplot* and *lattice*, so these two packages are loaded automatically. The *caret* package contains functions for training and plotting classification and regression models, and the *randomForest* package contains functions for classification and regression based on a forest of trees using random inputs.
+
+###b. Reading & Partitioning the Data
+
+```{r read_data}
+data <- read.csv(file = "data/pml-training.csv", header = TRUE)
+validation <- read.csv(file = "data/pml-testing.csv", header = TRUE)
+```
+
+The *pml-training.csv* data is what we are going to use to train our machine learning algorithm. It contains **19622** observations of **160** variables. The *pml-testing.csv* is the data set that we are trying to predict the *classe*s of – we placed this data under the object *validation*. *pml-testing.csv* is not to be used in any part of the machine learning algorithm building process. Next, we need to use cross validation on the *pml-training.csv* dataset; we can do this by partitioning the data into a *training* and *testing* dataset.
+
+```{r partition}
+inTrain <- createDataPartition(y=data$classe, p=0.75, list = FALSE)
+training <- data[inTrain,]
+testing <- data[-inTrain,]
+```
+
+We chose a 3/4 split between the *training* and *testing* data, because we felt 75% was enough to effectively train the data without overfitting and 25% was enough to accurately test our algorithm on a non-biased dataset. Now that we have set up the cross-validation for our data, we need to clean the date for effective prediction.
+
+
+##2. Data Cleaning
+###a. Exploratory Analysis
+
+Before we do any data cleaning, we need to set the seed in order to ensure reproducibility.
+
+```{r set_seed}
+set.seed(2018)
+```
+
+The first thing we need to do is observe the characteristics of the *training* data, as that is the data we will be cleaning. We can start by looking at the dimensions of the dataset.
+
+```{r dimensions}
+dim(training)
+```
+
+As we can see, there are 160 variables. To avoid overfitting, we need to try and reduce these variables as much as we can. We can start by looking at the variable names to get an idea of which ones to remove.
+
+```{r names}
+colnames(training)
+```
+
+We can remove the variables, *X*, *user_name*, *raw_timestamp_part_1*, *raw_timestamp_part_2*, *cvtd_timestamp*, *new_window*, or *num_window* because they have no correlation with the *classe* variable.
+
+###b. Variable Reduction
+
+The 7 variables mentioned above are in columns 1-7, so these can be easily removed.
+
+```{r remove_obsolete}
+training <- training[,8:160]
+names(training)
+```
+
+Now our dataset contains only the variables that are appropriate for the prediction. But, what about the columns that contain mostly NA values? These variables can be removed, as their lack of data will be useless for the prediction. First, we need to set all types of NA observations to *NA*.
+
+```{r set_to_NA}
+training[training == "NA"] <- NA
+training[training == ""] <- NA
+training[training == "#DIV/0!"] <- NA
+```
+
+Now that all useless/empty data is set to NA, we can write a function that iterates through the dataset and removes all columns containing majority NA values.
+
+```{r RemoveNAColumns}
+##Removes all columns with over 66% NA values
+RemoveNAColumns <- function(old_df){
+  #First we create a "mock" training data set for manipulation.  
+  new_df <- old_df
+  #Build a for-loop that iterates through the "training" dataset
+  for(i in 1:length(old_df)){
+    #If the specified column in the "training" data set is more than 66% NA,
+    #then delete the column from the "new_train" dataset
+    if(sum(is.na(old_df[[i]]))/length(old_df[[i]]) >= 0.66){
+      new_df <- new_df[,-which(names(new_df) %in% colnames(old_df)[i])]
+    }
+  }
+  #return the "new_train" dataset, as that is the dataset we manipulated.
+  new_df
+}
+```
+
+We chose to remove variables with 66% NA data because if over 2/3 of the data is missing, that variable would be useless in predicting the outcome and could lead to major inaccuracies.
+
+```{r execute_RemoveNAColumns}
+training <- RemoveNAColumns(training)
+dim(training)
+```
+
+We are down to 53 variables, but we might be able reduce them even further. Let’s look at variables with near zero variability.
+
+```{r nzv}
+nzv <- nearZeroVar(training, saveMetrics = TRUE)
+summary(nzv)
+```
+
+There are no near zero variables to eliminate. Though, there is a potential for highly correlated variables that we can look for. If two variables are highly correlated, we should assume that including both predictors might not necessarily be quite useful, and we can combine them to reduce noise the in the prediction algorithm.
+
+```{r find_corr}
+#Finds the absolute value of the correlation of all variables besides the "classe" variable
+corr <- abs(cor(training[,-53]))
+#Searches through the correlation matrix ("coor") and tells you which variables
+#to remove in order to reduce pair-wise correlations
+corr_var <- findCorrelation(corr, 0.95, verbose = TRUE)
+```
+
+We decided anything with over a 95% correlation should be considered for removal, as removing one would still capture enough information for a proper execution of the prediction algorithm. Columns 10, 1, 8, and 33 are flagged for correlation over 95%.
+
+```{r remove_corr}
+training <- training[,-corr_var]
+dim(training)
+names(training)
+```
+
+We have successfully cut down to 49 variables from 160. This should be more than enough for an accurate prediction of the *classe* variable. Now we need to format the data for accurate prediction.
+
+###c. Formatting
+First we can look at the class of each variable. This can be done by writing a function that iterates through the dataset and reads the class of each column.
+
+```{r columnClasses}
+columnClasses <- function(df){
+  #Create 2 lists for column names and column classes
+  column <- c()
+  class <- c()
+
+  #Iterate through each column in the dataset, gathering the column names and
+  #column classes, and add that data to each list
+  for(i in 1:length(df)){
+    column <- c(column,colnames(df)[i])
+    class <- c(class,class(df[[i]]))
+  }
+
+  #Create a dataframe with two lists
+  colclass <- data.frame(column, class)
+  colnames(colclass) <- c("Variable", "Class")
+  colclass
+}
+columnClasses(training)
+```
+
+All of the variables (besides the *classe* variable) are some type of number class. We can write a function that will change all numbers to *numeric* and all other variables to *factors*
+
+```{r formatClass}
+##Change the class of each number to "numeric" and everything else to "factor" 
+formatClass <- function(df){
+  #Iterate through each column in the data frame, and set all numbers to
+  #"numeric" and everything else to "factor".
+  for(i in 1:length(df)){
+    if(class(df[[i]]) == "numeric" || class(df[[i]]) == "integer"){
+      df[[i]] <- as.numeric(df[[i]])
+    }
+    else{
+      df[[i]] <- as.factor(df[[i]])
+    }
+  }
+  
+  df
+}
+training <- formatClass(training)
+columnClasses(training)
+```
+
+Lastly, we need to check id there are any more NA values to deal with, as prediction algorithms are not built to handle missing data in most cases.
+
+```{r isNA}
+sum(is.na(training))
+```
+
+Luckily, all the NA values were eliminated while the cleaning the data, so we can move on. However, if this was not the case, we would need to choose to either use K-Nearest Neighbor Imputation or completely remove the variables. Now that the data is cleaned and formatted, we can move on to writing our prediction algorithm.
+
+
+##3. Prediction
+###a. Training the Data
+
+I decided through testing a series of different prediction methods, that a Random Forest model would be the most accurate and efficient way of predicting the *classe* of the workout. Due to the small relatively small size of the dataset, with only **14718** observations of **49** variables, we do not need to worry about computational speed.
+
+```{r rf_train}
+rf_model <- randomForest(classe ~ ., data = training)
+rf_model
+```
+
+I decided, through testing a series of different prediction methods, that a Random Forest model would be the most accurate and efficient way of predicting the *classe* of the workout. Due to the small relatively small size of the dataset, with only **14718** observations of **49** variables, we do not need to worry about the notoriously slow computational speed of random forests.
+
+###b. Testing Set Prediction
+
+```{r rf_predict}
+rf_predict <- predict(rf_model,testing)
+rf_cm <- confusionMatrix(rf_predict,testing$classe)
+rf_cm
+```
+
+This method seemed to work very well, with an accuracy of **`r rf_cm$overall[["Accuracy"]]*100`%** and an expected our-of-sample error rate of **`r 100-rf_cm$overall[["Accuracy"]]*100`%**.
+
+
+###c. Final Prediction
+
+Now that I know this algorithm is extremely accurate in predicting the class on the *training* and *testing* data, I can apply it to the *validation* data.
+
+```{r final_prediction}
+validation <- read.csv(file = "data/pml-testing.csv", header = TRUE)
+final_predict <- predict(rf_model, validation)
+final_predict
+```
+
+According to the Coursera Project Prediction Quiz, these predictions on the *validation* set are **100%** accurate.
